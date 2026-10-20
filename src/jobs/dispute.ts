@@ -21,6 +21,8 @@
  * listing.
  */
 
+import { createHash } from "node:crypto";
+
 import { blake2b } from "@noble/hashes/blake2b";
 import {
   ValueKind,
@@ -544,7 +546,7 @@ function consultationVariant(outcomeHex: string): number | null {
   }
 }
 
-async function fetchJson(url: string, fetchImpl: typeof fetch): Promise<unknown> {
+async function fetchText(url: string, fetchImpl: typeof fetch): Promise<string> {
   const response = await fetchImpl(url, {
     method: "GET",
     headers: { accept: "application/json", "user-agent": "oter-keeper/0.1.0" },
@@ -557,10 +559,34 @@ async function fetchJson(url: string, fetchImpl: typeof fetch): Promise<unknown>
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} from ${url}`);
   }
+  return text;
+}
+
+async function fetchJson(url: string, fetchImpl: typeof fetch): Promise<unknown> {
+  const text = await fetchText(url, fetchImpl);
   try {
     return JSON.parse(text) as unknown;
   } catch {
     throw new Error(`the answer from ${url} is not JSON`);
+  }
+}
+
+/** A stable fingerprint of the document as served, so an unchanged body is not re-verified. */
+export function documentHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function storedOutcome(outcome: string): string {
+  switch (outcome) {
+    case "figures":
+    case "serialization":
+      return "MISMATCH (unchanged document, reported once today)";
+    case "unknown":
+      return "UNKNOWN (unchanged document, reported once today)";
+    case "malformed":
+      return "cannot verify (unchanged document, reported once today)";
+    default:
+      return `${outcome} (unchanged document, reported once today)`;
   }
 }
 
@@ -676,15 +702,39 @@ async function checkMirrors(
 
   const client = tallyGateway(context.gateway);
   const xrd = XRD_RESOURCES[context.config.network];
+  const day = utcDay(new Date());
   for (const row of mirrorRows(listing)) {
     const id = String(row.official_id);
     const kind = encodeURIComponent(row.kind);
-    let document: unknown;
+    const stateKey = `mirror:${kind}:${id}`;
+
+    let text: string;
     try {
-      document = await fetchJson(`${api}/api/official/${kind}/${encodeURIComponent(id)}/tally`, fetchImpl);
+      text = await fetchText(`${api}/api/official/${kind}/${encodeURIComponent(id)}/tally`, fetchImpl);
     } catch (error) {
       context.logger.warn(
         `[dispute] mirror ${row.kind} ${id}: tally unavailable: ${(error as Error).message}`,
+      );
+      continue;
+    }
+    const hash = documentHash(text);
+
+    // An unchanged document is not verified again. A MATCH was reported once; a MISMATCH or
+    // UNKNOWN may be repeated, but at most once per UTC day, because nothing about it changed.
+    const cached = context.state.mirror(stateKey);
+    if (cached !== null && cached.hash === hash) {
+      if (cached.outcome === "match" || cached.day === day) continue;
+      context.logger.warn(`[dispute] mirror ${row.kind} ${id}: ${storedOutcome(cached.outcome)}`);
+      context.state.setMirror(stateKey, { ...cached, day });
+      continue;
+    }
+
+    let document: unknown;
+    try {
+      document = JSON.parse(text) as unknown;
+    } catch {
+      context.logger.warn(
+        `[dispute] mirror ${row.kind} ${id}: tally unavailable: the answer is not JSON`,
       );
       continue;
     }
@@ -700,6 +750,7 @@ async function checkMirrors(
       continue;
     }
 
+    context.state.setMirror(stateKey, { hash, outcome: outcome.kind, day });
     const message = `[dispute] mirror ${row.kind} ${id}: ${describe(outcome)}`;
     if (outcome.kind === "match") context.logger.info(message);
     else context.logger.warn(message);
@@ -828,6 +879,12 @@ export async function findWork(context: JobContext): Promise<WorkItem[]> {
 
     if (!enabled || disputeConfig === undefined) {
       context.logger.warn(`[dispute] ${label}: disputes are off; not posting a ${formatXrd(bond)} bond`);
+      continue;
+    }
+    if (context.history?.ok === false) {
+      context.logger.warn(
+        `[dispute] ${label}: today's account history could not be read at start; disputes are report-only for this run`,
+      );
       continue;
     }
     const maxBond = parseXrd(disputeConfig.max_bond);

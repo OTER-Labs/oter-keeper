@@ -6,6 +6,7 @@ import { PrivateKey } from "@radixdlt/radix-engine-toolkit";
 
 import { XRD_RESOURCES, type KeeperConfig } from "../src/config.ts";
 import type { Components } from "../src/discover.ts";
+import { loadDayHistory } from "../src/history.ts";
 import { Limits, parseXrd, utcDay } from "../src/limits.ts";
 import { nowSeconds, type JsonField } from "../src/oracle.ts";
 import type { JobContext } from "../src/runner.ts";
@@ -143,6 +144,28 @@ interface ContextOptions {
   liveSubmit?: boolean;
   official?: ReplySource;
   entityDetails?: ReplySource;
+  historyTxs?: unknown[];
+  historyFailure?: boolean;
+}
+
+function historyTransaction(fee: string, method: string): Record<string, unknown> {
+  return {
+    transaction_status: "CommittedSuccess",
+    state_version: 1,
+    intent_hash: `tx-${method}`,
+    fee_paid: fee,
+    manifest_instructions: [
+      "CALL_METHOD",
+      `    Address("${ACCOUNT}")`,
+      '    "lock_fee"',
+      `    Decimal("${fee}")`,
+      ";",
+      "CALL_METHOD",
+      `    Address("${CONSULTATION_IDENTIFIER}")`,
+      `    "${method}"`,
+      ";",
+    ].join("\n"),
+  };
 }
 
 function components(withElection = false): Components {
@@ -181,7 +204,18 @@ function context(
     body: statusBody("stokenet", 100, options.epoch ?? 10),
   });
   http.always("/stream/transactions", (request) => {
-    const body = request.body as { event_global_emitters_filter?: string[] };
+    const body = request.body as {
+      event_global_emitters_filter?: string[];
+      affected_global_entities_filter?: string[];
+    };
+    if (body.affected_global_entities_filter !== undefined) {
+      if (options.historyFailure === true) {
+        return { status: 500, body: { error: "gateway gap" } };
+      }
+      return {
+        body: { items: options.historyTxs ?? [], next_cursor: null },
+      };
+    }
     const emitter = body.event_global_emitters_filter?.[0] ?? "";
     const emitterEvents = events[emitter] ?? [];
     return {
@@ -221,7 +255,7 @@ function context(
         };
       }),
   );
-  http.on("/api/official", options.official ?? { body: [] });
+  http.always("/api/official", options.official ?? { body: [] });
   http.on("/transaction/preview", { body: { receipt: { status: "Succeeded" } } });
 
   const config: KeeperConfig = {
@@ -548,6 +582,88 @@ test("dispute: an election mismatch builds the winner counter-claim", async () =
   const manifest = manifestOf(http);
   assert.match(manifest, /dispute_election_result/);
   assert.match(manifest, /Enum<1u8>/);
+});
+
+test("dispute: the ledger's dispute count reaches max_bonds_per_day and stops a mismatch", async () => {
+  const http = new FakeHttp();
+  const ctx = context(
+    http,
+    {
+      [ORACLE]: [requestPosted(), proposal()],
+      [CONSULTATION_IDENTIFIER]: [tallyAssertion(OUTCOME1)],
+    },
+    {
+      enabled: true,
+      maxBondsPerDay: 2,
+      historyTxs: [
+        historyTransaction("0.1", "dispute_resolution"),
+        historyTransaction("0.1", "dispute_election_result"),
+      ],
+    },
+  );
+  http.on("/api/consultation/c1/tally", tallyReply(MISMATCH_DOCUMENT));
+
+  const summary = await loadDayHistory(ctx.state, ctx.gateway, ACCOUNT, ctx.logger);
+  assert.equal(summary.ok, true);
+  assert.equal(ctx.state.disputesToday(utcDay(new Date())), 2);
+
+  assert.deepEqual(await dispute.findWork(ctx), []);
+  assert.ok(ctx.logger.warnMessages.some((message) => /max_bonds_per_day/.test(message)));
+});
+
+test("dispute: a failed history read leaves disputes report-only for the run", async () => {
+  const http = new FakeHttp();
+  const ctx = context(
+    http,
+    {
+      [ORACLE]: [requestPosted(), proposal()],
+      [CONSULTATION_IDENTIFIER]: [tallyAssertion(OUTCOME1)],
+    },
+    { enabled: true, historyFailure: true },
+  );
+  http.on("/api/consultation/c1/tally", tallyReply(MISMATCH_DOCUMENT));
+
+  ctx.history = await loadDayHistory(ctx.state, ctx.gateway, ACCOUNT, ctx.logger);
+  assert.equal(ctx.history.ok, false);
+  assert.ok(ctx.logger.warnMessages.some((message) => /history read failed/.test(message)));
+
+  assert.deepEqual(await dispute.findWork(ctx), []);
+  assert.ok(
+    ctx.logger.warnMessages.some((message) =>
+      /report-only for this run/.test(message),
+    ),
+  );
+});
+
+test("dispute: an unchanged mirror MATCH is not verified again, and a new body is", async () => {
+  const http = new FakeHttp();
+  const ctx = context(
+    http,
+    { [ORACLE]: [requestPosted(), proposal()] },
+    {
+      enabled: true,
+      official: { body: [{ kind: "proposal", official_id: 7 }] },
+    },
+  );
+  http.always("/api/official/proposal/7/tally", tallyReply(MATCH_DOCUMENT));
+
+  const matches = (): number =>
+    ctx.logger.infoMessages.filter((message) => /mirror proposal 7: MATCH/.test(message))
+      .length;
+
+  await dispute.findWork(ctx);
+  assert.equal(matches(), 1);
+  assert.equal(ctx.state.mirror("mirror:proposal:7")?.outcome, "match");
+
+  await dispute.findWork(ctx);
+  assert.equal(matches(), 1, "an unchanged document is not verified or reported again");
+
+  http.always("/api/official/proposal/7/tally", tallyReply(MISMATCH_DOCUMENT));
+  await dispute.findWork(ctx);
+  assert.ok(
+    ctx.logger.warnMessages.some((message) => /mirror proposal 7: MISMATCH/.test(message)),
+  );
+  assert.equal(ctx.state.mirror("mirror:proposal:7")?.outcome, "figures");
 });
 
 test("dispute: a mirror mismatch is reported and never builds a transaction", async () => {

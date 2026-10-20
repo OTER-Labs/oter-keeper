@@ -29,6 +29,7 @@ import {
   type Components,
 } from "./discover.ts";
 import { Gateway, GatewayError, type GatewayStatus } from "./gateway.ts";
+import { loadDayHistory, type HistorySummary } from "./history.ts";
 import { Limits, parseXrd } from "./limits.ts";
 import { JOBS, Runner, jobRuns, type JobContext } from "./runner.ts";
 import { StateFile, StateError } from "./state.ts";
@@ -99,6 +100,7 @@ async function printWork(
   config: KeeperConfig,
   gateway: Gateway,
   components: Components,
+  history: HistorySummary | undefined,
 ): Promise<void> {
   const statePath = join(
     mkdtempSync(join(tmpdir(), "oter-keeper-check-")),
@@ -111,6 +113,7 @@ async function printWork(
     executor: CHECK_EXECUTOR,
     state: StateFile.load(statePath),
     logger: consoleLogger,
+    ...(history === undefined ? {} : { history }),
   };
 
   consoleLogger.info("would do (nothing is built or submitted):");
@@ -195,7 +198,24 @@ async function check(configPath: string, env: NodeJS.ProcessEnv): Promise<number
   }
 
   if (components !== null) {
-    await printWork(config, gateway, components);
+    let history: HistorySummary | undefined;
+    try {
+      // `check` reports the figures without writing the local ledger.
+      history = await loadDayHistory(
+        StateFile.load(),
+        gateway,
+        config.account,
+        consoleLogger,
+        { persist: false },
+      );
+    } catch (error) {
+      if (error instanceof StateError) {
+        consoleLogger.info(`state file unavailable: ${error.message}`);
+      } else {
+        throw error;
+      }
+    }
+    await printWork(config, gateway, components, history);
   }
   printJobs(config);
   return 0;
@@ -223,6 +243,12 @@ async function runKeeper(
   printComponents(resolved.components, resolved.source);
 
   const state = StateFile.load();
+  const history = await loadDayHistory(
+    state,
+    gateway,
+    config.account,
+    consoleLogger,
+  );
   const limits = new Limits(state, {
     maxFeePerTx: parseXrd(config.max_fee_xrd_per_tx),
     maxFeePerDay: parseXrd(config.max_fee_xrd_per_day),
@@ -246,6 +272,7 @@ async function runKeeper(
     executor,
     state,
     logger: consoleLogger,
+    history,
   });
 
   if (command === "once") {

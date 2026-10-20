@@ -17,6 +17,15 @@ export class StateError extends Error {
   }
 }
 
+export interface MirrorRecord {
+  /** A hash of the document body as it was served, so a new body is re-verified. */
+  hash: string;
+  /** The verifier's outcome kind: match, figures, serialization, unknown or malformed. */
+  outcome: string;
+  /** The UTC day the outcome was last reported, so a repeat is at most once a day. */
+  day: string;
+}
+
 interface StateData {
   version: 1;
   cursors: Record<string, number>;
@@ -24,6 +33,8 @@ interface StateData {
   fees: Record<string, string>;
   /** Day (UTC, YYYY-MM-DD) to disputes submitted that day. */
   disputes: Record<string, number>;
+  /** The last verified document per official vote, keyed by `<kind>:<official_id>`. */
+  mirrors: Record<string, MirrorRecord>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -78,7 +89,28 @@ function parseData(text: string, path: string): StateData {
     }
   }
 
-  return { version: 1, cursors, fees, disputes };
+  const mirrors: Record<string, MirrorRecord> = {};
+  if (isRecord(raw.mirrors)) {
+    for (const [key, value] of Object.entries(raw.mirrors)) {
+      if (!isRecord(value)) {
+        throw new StateError(`state file ${path} has an invalid mirror entry for ${key}`);
+      }
+      const { hash, outcome, day } = value;
+      if (
+        typeof hash !== "string" ||
+        hash === "" ||
+        typeof outcome !== "string" ||
+        outcome === "" ||
+        typeof day !== "string" ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(day)
+      ) {
+        throw new StateError(`state file ${path} has an invalid mirror entry for ${key}`);
+      }
+      mirrors[key] = { hash, outcome, day };
+    }
+  }
+
+  return { version: 1, cursors, fees, disputes, mirrors };
 }
 
 export class StateFile {
@@ -92,7 +124,13 @@ export class StateFile {
 
   static load(path: string = DEFAULT_STATE_PATH): StateFile {
     if (!existsSync(path)) {
-      return new StateFile(path, { version: 1, cursors: {}, fees: {}, disputes: {} });
+      return new StateFile(path, {
+        version: 1,
+        cursors: {},
+        fees: {},
+        disputes: {},
+        mirrors: {},
+      });
     }
     let text: string;
     try {
@@ -128,6 +166,17 @@ export class StateFile {
     this.save();
   }
 
+  /**
+   * Raise the day's spend to at least `attos`, never lowering it. The start-up history read
+   * uses this so the local ledger and the account's own history agree on the larger figure.
+   */
+  raiseSpend(day: string, attos: bigint): void {
+    if (attos < 0n) throw new StateError("a spend cannot be negative");
+    if (attos <= this.spent(day)) return;
+    this.data.fees[day] = attos.toString();
+    this.save();
+  }
+
   /** Disputes submitted on `day` (UTC, YYYY-MM-DD). */
   disputesToday(day: string): number {
     return this.data.disputes[day] ?? 0;
@@ -136,6 +185,26 @@ export class StateFile {
   /** Record one dispute as submitted. A bond posted outside this keeper is not counted. */
   addDispute(day: string): void {
     this.data.disputes[day] = this.disputesToday(day) + 1;
+    this.save();
+  }
+
+  /** Raise the day's dispute count to at least `count`, never lowering it. */
+  raiseDisputes(day: string, count: number): void {
+    if (!Number.isInteger(count) || count < 0) {
+      throw new StateError("a dispute count must be a non-negative integer");
+    }
+    if (count <= this.disputesToday(day)) return;
+    this.data.disputes[day] = count;
+    this.save();
+  }
+
+  /** The last verified document for one official vote, or null when it was never verified. */
+  mirror(key: string): MirrorRecord | null {
+    return this.data.mirrors[key] ?? null;
+  }
+
+  setMirror(key: string, record: MirrorRecord): void {
+    this.data.mirrors[key] = record;
     this.save();
   }
 

@@ -8,6 +8,7 @@
 import { resolvedJobConfig, type KeeperConfig } from "./config.ts";
 import type { Components } from "./discover.ts";
 import type { Gateway } from "./gateway.ts";
+import type { HistorySummary } from "./history.ts";
 import type { StateFile } from "./state.ts";
 import type { Executor, Logger, Outcome } from "./tx.ts";
 import * as burnSeat from "./jobs/burn-seat.ts";
@@ -26,6 +27,11 @@ export interface JobContext {
   executor: Executor;
   state: StateFile;
   logger: Logger;
+  /**
+   * The start-up read of today's figures from the account's history. Absent when no read was
+   * made; `ok === false` means the read failed and bond spending must stop for this run.
+   */
+  history?: HistorySummary;
   /** HTTP fetch for the platform's public API; tests inject one, production uses the global. */
   fetchImpl?: typeof fetch;
 }
