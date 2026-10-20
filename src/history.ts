@@ -181,7 +181,13 @@ export async function readAccountHistory(
 
     for (const item of page.items ?? []) {
       const manifest = item.manifest_instructions;
-      if (typeof manifest !== "string" || manifest === "") continue;
+      if (typeof manifest !== "string" || manifest === "") {
+        // A user transaction always has a manifest. A Gateway that leaves it out would make
+        // every figure read as zero, so the read fails rather than undercount.
+        throw new HistoryError(
+          "the Gateway returned a transaction without its manifest; treating today's figures as unread",
+        );
+      }
 
       const calls = manifestCalls(manifest);
       const paidByAccount = calls.some(

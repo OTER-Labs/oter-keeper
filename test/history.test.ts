@@ -253,3 +253,14 @@ test("history: hitting the page cap counts as a failed read", async () => {
   assert.equal(summary.ok, false);
   assert.match(summary.error ?? "", /did not end/);
 });
+
+test("history: a transaction without its manifest fails the read", async () => {
+  const bare = transaction("0.2", "finalize_request");
+  delete bare.manifest_instructions;
+  const context = historyContext([bare]);
+
+  await assert.rejects(
+    () => readAccountHistory(context.gateway, ACCOUNT, { now: () => DAY }),
+    /without its manifest/,
+  );
+});
