@@ -31,6 +31,7 @@ import {
   findNonFungibleVault,
   jsonFields,
   nowSeconds,
+  readSpaceZeroSeatResource,
 } from "../oracle.ts";
 import type { JobContext, WorkItem } from "../runner.ts";
 import { buildCall, type Outcome } from "../tx.ts";
@@ -181,6 +182,25 @@ export async function findWork(context: JobContext): Promise<WorkItem[]> {
   for await (const event of streamEvents(context.gateway, registry, from)) {
     scan.lastStateVersion = Math.max(scan.lastStateVersion, event.state_version);
     readEvent(scan, event);
+  }
+
+  // Space 0 is written by the registry's `new`, so its creation event is package-emitted
+  // and never rides the component's stream. Its seat resource lives in the registry's own
+  // `spaces` key-value store; without this read a space 0 seat could never be burned.
+  const spaceZeroNeedsResource = [...scan.seats.values()].some(
+    (seat) => seat.space_id === 0 && !scan.seatResources.has(0),
+  );
+  if (spaceZeroNeedsResource) {
+    try {
+      const seatResource = await readSpaceZeroSeatResource(context.gateway, registry);
+      if (seatResource !== null) scan.seatResources.set(0, seatResource);
+    } catch (error) {
+      context.logger.warn(
+        `[burn_seat] could not read space 0's seat resource from the registry state: ${
+          (error as Error).message
+        }`,
+      );
+    }
   }
 
   const work: WorkItem[] = [];

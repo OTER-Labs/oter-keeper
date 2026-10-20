@@ -16,6 +16,7 @@ import * as openReveal from "../src/jobs/open-reveal.ts";
 import * as redeemBonds from "../src/jobs/redeem-bonds.ts";
 import * as burnSeat from "../src/jobs/burn-seat.ts";
 import * as openVote from "../src/jobs/open-vote.ts";
+import * as settle from "../src/jobs/settle.ts";
 import { FakeHttp, makeGateway, statusBody, type Reply } from "./fake-gateway.ts";
 import { MemoryLogger, tempDir } from "./helpers.ts";
 
@@ -29,6 +30,13 @@ const SEAT_RESOURCE = TICKET_RESOURCE;
 const SEAT_VAULT =
   "internal_vault_tdx_2_1nzfsaxa4sdx0l55x05yf9zuz80wt9em092xmzvnj6t8rryvhsu6wat";
 const ELECTION = "election1";
+const HUB = "component_tdx_2_1cpym9e0ht2pv8lnxfq635jaumcmgh5ef0vasukp8qv4a0zsswvahfu";
+const TREASURY =
+  "component_tdx_2_1crl2w2l9lcztszdknmmj4zrkc9600yhspej8k8e79wxzl55x35daeg";
+const ESCROW = "component_tdx_2_1czvzh4gk7xfdl5dvap0r39tcps3xhqjwthvdyvgedjm2z34q085cux";
+const DISTRIBUTION =
+  "component_tdx_2_1crgf2lnt8ctx7zmhln7g9e2pw3p5zeyhue4hlrwj0zvmzs7lu3ykpd";
+const GRANT = "grant1";
 const KEY = new PrivateKey.Ed25519(new Uint8Array(32).fill(0x22));
 
 const CONFIG: KeeperConfig = {
@@ -128,6 +136,10 @@ function tuple(name: string, typeName: string, fields: JsonField[]): JsonField {
 
 function enumField(name: string, variant: string): JsonField {
   return { field_name: name, kind: "Enum", type_name: "BondStatus", variant_name: variant, fields: [] };
+}
+
+function arrayField(name: string, elements: unknown[]): JsonField {
+  return { field_name: name, kind: "Array", type_name: "Decimal", elements };
 }
 
 function event(name: string, fields: JsonField[]) {
@@ -588,21 +600,21 @@ function seatsSealed(termEnd: number, electionId = ELECTION): unknown {
   ]);
 }
 
-function seatClaimed(holder = OTHER_ACCOUNT, seatIndex = 0): unknown {
+function seatClaimed(holder = OTHER_ACCOUNT, seatIndex = 0, spaceId = 7): unknown {
   return event("SeatClaimedEvent", [
     field("election_id", ELECTION),
     field("seat_index", seatIndex, "U32"),
     field("holder", holder, "Reference"),
     field("local_id", "<election1_0>"),
-    field("space_id", 7, "U32"),
+    field("space_id", spaceId, "U32"),
   ]);
 }
 
-function seatRevoked(burned: boolean, seatIndex = 0): unknown {
+function seatRevoked(burned: boolean, seatIndex = 0, spaceId = 7): unknown {
   return event("SeatRevokedEvent", [
     field("election_id", ELECTION),
     field("seat_index", seatIndex, "U32"),
-    field("space_id", 7, "U32"),
+    field("space_id", spaceId, "U32"),
     field("recall_consultation_id", "recall1"),
     field("burned", burned, "Bool"),
   ]);
@@ -872,4 +884,318 @@ test("redeem_own_bonds: nothing is read for another account when the account hol
   for (const body of http.bodies("/state/entity/page/non-fungibles")) {
     assert.equal((body as { address: string }).address, ACCOUNT);
   }
+});
+
+// ---------------------------------------------------------------------------
+// settle
+// ---------------------------------------------------------------------------
+
+function distributionCreated(
+  distribution = DISTRIBUTION,
+  treasury = TREASURY,
+  expiry = nowSeconds() - 100,
+  minEpoch = 0,
+): unknown {
+  return event("SpaceTreasuryDistributionCreatedEvent", [
+    field("component_address", treasury),
+    field("request_id", "request1"),
+    field("distribution", distribution),
+    field("resource", SEAT_RESOURCE, "Reference"),
+    field("expiry", expiry, "I64"),
+    field("expiry_min_epoch", minEpoch, "U64"),
+  ]);
+}
+
+function distributionSettled(distribution = DISTRIBUTION): unknown {
+  return event("SpaceTreasuryDistributionSettledEvent", [
+    field("component_address", TREASURY),
+    field("distribution", distribution),
+    field("open_distributions", 0, "U32"),
+  ]);
+}
+
+function grantFunded(
+  treasury = TREASURY,
+  escrow = ESCROW,
+  grantId = GRANT,
+  milestoneCount = 2,
+): unknown {
+  return event("SpaceTreasuryGrantFundedEvent", [
+    field("component_address", treasury),
+    field("request_id", "request1"),
+    field("escrow", escrow),
+    field("grant_id", grantId),
+    field("resource", SEAT_RESOURCE, "Reference"),
+    field("amount", "2"),
+    field("grantee", OTHER_ACCOUNT, "Reference"),
+    field("title", "a grant"),
+    arrayField("milestone_amounts", Array.from({ length: milestoneCount }, () => "1")),
+  ]);
+}
+
+function grantSettled(escrow = ESCROW, grantId = GRANT): unknown {
+  return event("SpaceTreasuryGrantSettledEvent", [
+    field("component_address", TREASURY),
+    field("escrow", escrow),
+    field("grant_id", grantId),
+    field("open_grants", 0, "U32"),
+  ]);
+}
+
+function milestoneSettled(index: number, result = "Released"): unknown {
+  return event("MilestoneSettledEvent", [
+    field("grant_id", GRANT),
+    field("milestone_index", index, "U32"),
+    field("request_id", `request-${index}`),
+    field("outcome_hex", "01"),
+    field("result", result),
+    field("amount", "1"),
+  ]);
+}
+
+function fallbackAccrued(
+  recipient = TREASURY,
+  totalOwed = "5",
+  amount = "5",
+): unknown {
+  return event("FallbackAccruedEvent", [
+    field("grant_id", GRANT),
+    field("account", recipient, "Reference"),
+    field("amount", amount),
+    field("total_owed", totalOwed),
+  ]);
+}
+
+function fallbackClaimed(recipient = TREASURY, amount = "5"): unknown {
+  return event("FallbackClaimedEvent", [
+    field("account", recipient, "Reference"),
+    field("amount", amount),
+  ]);
+}
+
+function fungibleVaults(amounts: string[]): Reply {
+  return {
+    body: {
+      items: [
+        {
+          fungible_resources: {
+            total_count: amounts.length,
+            items: amounts.map((amount) => ({
+              resource_address: SEAT_RESOURCE,
+              amount,
+              aggregation_level: "Global",
+            })),
+          },
+        },
+      ],
+    },
+  };
+}
+
+function settleContext(http: FakeHttp, options: ContextOptions = {}): JobContext {
+  const ctx = context(http, options);
+  ctx.components.spaceTreasuryHub = HUB;
+  return ctx;
+}
+
+test("settle: return_unclaimed is not due while the epoch floor still holds the window", async () => {
+  const http = new FakeHttp();
+  http.on("/stream/transactions", stream([distributionCreated(DISTRIBUTION, TREASURY, nowSeconds() - 100, 20)]));
+  http.on("/state/entity/details", fungibleVaults(["5"]));
+  const ctx = settleContext(http, { epoch: 10 });
+
+  assert.deepEqual(await settle.findWork(ctx), []);
+});
+
+test("settle: return_unclaimed is due once the deadline and the epoch floor are met", async () => {
+  const http = new FakeHttp();
+  http.on("/stream/transactions", stream([distributionCreated(DISTRIBUTION, TREASURY, nowSeconds() - 100, 20)]));
+  http.on("/state/entity/details", fungibleVaults(["5"]));
+  http.on("/transaction/preview", { body: { receipt: { status: "Succeeded" } } });
+  const ctx = settleContext(http, { epoch: 20 });
+
+  const [item] = await settle.findWork(ctx);
+  assert.equal(item?.kind, "return_unclaimed");
+  assert.equal(await settle.act(ctx, item!), "dry_run");
+  const preview = http.bodies("/transaction/preview")[0] as { manifest: string };
+  assert.match(preview.manifest, /return_unclaimed/);
+  assert.ok(preview.manifest.includes(DISTRIBUTION));
+});
+
+test("settle: settle_distribution is due only when the distribution holds nothing", async () => {
+  const http = new FakeHttp();
+  http.on("/stream/transactions", stream([distributionCreated()]));
+  http.on("/state/entity/details", fungibleVaults(["0"]));
+  http.on("/transaction/preview", { body: { receipt: { status: "Succeeded" } } });
+  const ctx = settleContext(http, { epoch: 20 });
+
+  const work = await settle.findWork(ctx);
+  assert.deepEqual(
+    work.map((item) => item.kind),
+    ["settle_distribution"],
+  );
+  assert.equal(await settle.act(ctx, work[0]!), "dry_run");
+  const preview = http.bodies("/transaction/preview")[0] as { manifest: string };
+  assert.match(preview.manifest, /settle_distribution/);
+  assert.ok(preview.manifest.includes(TREASURY));
+  assert.ok(preview.manifest.includes(DISTRIBUTION));
+});
+
+test("settle: a distribution holding funds is not settled even after its window", async () => {
+  const http = new FakeHttp();
+  http.on("/stream/transactions", stream([distributionCreated()]));
+  http.on("/state/entity/details", fungibleVaults(["1"]));
+  const ctx = settleContext(http, { epoch: 20 });
+
+  const [item] = await settle.findWork(ctx);
+  assert.equal(item?.kind, "return_unclaimed");
+  assert.equal(http.count("/transaction/preview"), 0);
+});
+
+test("settle: a refused deliver_fallback falls back to collect_grant_refunds", async () => {
+  const http = new FakeHttp();
+  http.on("/stream/transactions", stream([fallbackAccrued()]));
+  http.on("/transaction/preview", {
+    body: { receipt: { status: "Failed", error_message: "Resource is not listed in this treasury" } },
+  });
+  http.on("/transaction/preview", { body: { receipt: { status: "Succeeded" } } });
+  const ctx = context(http);
+  ctx.components.grantEscrow = ESCROW;
+  ctx.components.spaceTreasuries = [TREASURY];
+
+  const [item] = await settle.findWork(ctx);
+  assert.equal(item?.kind, "deliver_fallback");
+  assert.equal(await settle.act(ctx, item!), "dry_run");
+
+  assert.equal(http.count("/transaction/preview"), 2);
+  const previews = http.bodies("/transaction/preview") as Array<{ manifest: string }>;
+  assert.match(previews[0]!.manifest, /deliver_fallback/);
+  assert.ok(previews[0]!.manifest.includes(TREASURY));
+  assert.match(previews[1]!.manifest, /collect_grant_refunds/);
+  assert.equal(http.count("/transaction/submit"), 0);
+});
+
+test("settle: settle_grant waits until the escrow reports every milestone closed", async () => {
+  const http = new FakeHttp();
+  http.on("/stream/transactions", stream([grantFunded()]));
+  http.on("/stream/transactions", stream([milestoneSettled(0)]));
+  const ctx = settleContext(http);
+  ctx.components.grantEscrow = ESCROW;
+
+  assert.deepEqual(await settle.findWork(ctx), []);
+});
+
+test("settle: settle_grant is due once the escrow reports the grant closed", async () => {
+  const http = new FakeHttp();
+  http.on("/stream/transactions", stream([grantFunded()]));
+  http.on("/stream/transactions", stream([milestoneSettled(0), milestoneSettled(1)]));
+  http.on("/transaction/preview", { body: { receipt: { status: "Succeeded" } } });
+  const ctx = settleContext(http);
+  ctx.components.grantEscrow = ESCROW;
+
+  const [item] = await settle.findWork(ctx);
+  assert.equal(item?.kind, "settle_grant");
+  assert.equal(await settle.act(ctx, item!), "dry_run");
+  const preview = http.bodies("/transaction/preview")[0] as { manifest: string };
+  assert.match(preview.manifest, /settle_grant/);
+  assert.ok(preview.manifest.includes(GRANT));
+  assert.ok(preview.manifest.includes(TREASURY));
+});
+
+test("settle: an already settled distribution or grant is not due again", async () => {
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([
+      distributionCreated(),
+      distributionSettled(),
+      grantFunded(),
+      grantSettled(),
+    ]),
+  );
+  http.on("/stream/transactions", stream([]));
+  const ctx = settleContext(http);
+
+  assert.deepEqual(await settle.findWork(ctx), []);
+  assert.equal(http.count("/state/entity/details"), 0);
+});
+
+test("settle: a refused return (the resource was delisted) is retried, not an error", async () => {
+  const http = new FakeHttp();
+  http.on("/stream/transactions", stream([distributionCreated()]));
+  http.on("/stream/transactions", stream([distributionCreated()]));
+  http.on("/state/entity/details", fungibleVaults(["5"]));
+  http.on("/state/entity/details", fungibleVaults(["5"]));
+  http.on("/transaction/preview", {
+    body: { receipt: { status: "Failed", error_message: "Resource is not listed in this treasury" } },
+  });
+  const ctx = settleContext(http, { epoch: 20 });
+
+  const [first] = await settle.findWork(ctx);
+  assert.equal(await settle.act(ctx, first!), "previewed_refused");
+  assert.deepEqual((ctx.logger as MemoryLogger).errorMessages, []);
+
+  const [second] = await settle.findWork(ctx);
+  assert.equal(second?.kind, "return_unclaimed");
+});
+
+test("burn_seat: space 0's seat resource is read from the registry state, not its creation event", async () => {
+  const http = new FakeHttp();
+  // Space 0's creation event is package-emitted and never appears on the registry stream.
+  http.on(
+    "/stream/transactions",
+    stream([seatClaimed(OTHER_ACCOUNT, 0, 0), seatRevoked(false, 0, 0)]),
+  );
+  http.on("/state/entity/details", {
+    body: {
+      items: [
+        {
+          address: REGISTRY,
+          details: {
+            blueprint_name: "ConsultationRegistryV1",
+            state: {
+              fields: [
+                field("spaces", "internal_keyvaluestore_tdx_2_1kzuv86tt4r0rk5jr0jcu2pfgxp2m8vyjgqn0se97gpr8xwtgylh6j4", "Own"),
+              ],
+            },
+          },
+        },
+      ],
+    },
+  });
+  http.on("/state/key-value-store/data", {
+    body: {
+      entries: [
+        {
+          value: {
+            programmatic_json: {
+              kind: "Tuple",
+              type_name: "Space",
+              fields: [field("space_id", 0, "U32"), field("seat_resource", SEAT_RESOURCE, "Reference")],
+            },
+          },
+        },
+      ],
+    },
+  });
+  http.on("/state/entity/page/non-fungible-vaults", vaultReply(SEAT_VAULT));
+  http.on("/transaction/preview", { body: { receipt: { status: "Succeeded" } } });
+  const ctx = burnContext(http);
+
+  const work = await burnSeat.findWork(ctx);
+  assert.deepEqual(
+    work.map((item) => item.id),
+    [`${ELECTION}:0`],
+  );
+  assert.equal(await burnSeat.act(ctx, work[0]!), "dry_run");
+  const preview = http.bodies("/transaction/preview")[0] as { manifest: string };
+  assert.match(preview.manifest, /burn_seat/);
+  assert.ok(preview.manifest.includes(ELECTION));
+  assert.ok(preview.manifest.includes(SEAT_VAULT));
+
+  const read = http.bodies("/state/key-value-store/data")[0] as {
+    key_value_store_address: string;
+    keys: Array<{ key_hex: string }>;
+  };
+  assert.equal(read.keys[0]!.key_hex, "5c0900000000");
 });

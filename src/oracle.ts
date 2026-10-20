@@ -16,6 +16,8 @@ export interface JsonField {
   variant_name?: string;
   value?: unknown;
   fields?: unknown[];
+  /** The elements of an Array value. */
+  elements?: unknown[];
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -88,6 +90,15 @@ export function enumVariant(
   return typeof variant === "string" ? variant : null;
 }
 
+/** The elements of an array field, such as a list of milestone amounts. */
+export function fieldElements(
+  fields: readonly JsonField[],
+  name: string,
+): unknown[] | null {
+  const elements = fieldEntry(fields, name)?.elements;
+  return Array.isArray(elements) ? elements : null;
+}
+
 export function nowSeconds(): number {
   return Math.floor(Date.now() / 1_000);
 }
@@ -134,6 +145,116 @@ export async function readComponentField(
   name: string,
 ): Promise<string | null> {
   return fieldString(await readComponentState(gateway, address), name);
+}
+
+interface KeyValueStoreDataAnswer {
+  entries?: Array<{
+    value?: { programmatic_json?: unknown };
+  }>;
+}
+
+/**
+ * The SBOR key hex of a u32 key-value-store key: the `5c` payload prefix, the `09` U32 value
+ * kind, then the four little-endian bytes.
+ */
+export function u32KeyHex(value: number): string {
+  let hex = "";
+  let rest = value >>> 0;
+  for (let index = 0; index < 4; index += 1) {
+    hex += (rest & 0xff).toString(16).padStart(2, "0");
+    rest >>>= 8;
+  }
+  return `5c09${hex}`;
+}
+
+/** The fields behind one key of a key-value store, or null for a missing key. */
+export async function readKeyValueStoreFields(
+  gateway: Gateway,
+  store: string,
+  keyHex: string,
+): Promise<JsonField[] | null> {
+  const answer = await gateway.post<KeyValueStoreDataAnswer>(
+    "/state/key-value-store/data",
+    {
+      key_value_store_address: store,
+      keys: [{ key_hex: keyHex }],
+    },
+  );
+  const entry = answer.entries?.[0];
+  if (entry?.value === undefined) return null;
+  const fields = jsonFields(entry.value.programmatic_json);
+  return fields.length === 0 ? null : fields;
+}
+
+/**
+ * Space 0's seat-badge resource, read from the registry's own `spaces` key-value store.
+ *
+ * Space 0 is written by the registry's `new`, so its creation event is emitted by the package
+ * and is not on the component's event stream. The state is the only place it can be read.
+ */
+export async function readSpaceZeroSeatResource(
+  gateway: Gateway,
+  registry: string,
+): Promise<string | null> {
+  const spaces = await readComponentField(gateway, registry, "spaces");
+  if (spaces === null) return null;
+  const fields = await readKeyValueStoreFields(gateway, spaces, u32KeyHex(0));
+  return fields === null ? null : fieldString(fields, "seat_resource");
+}
+
+interface FungibleHolding {
+  resource: string;
+  amount: string;
+}
+
+interface EntityFungiblesAnswer {
+  items?: Array<{
+    fungible_resources?: {
+      items?: Array<{
+        resource_address?: string;
+        amount?: string;
+        vaults?: {
+          items?: Array<{ amount?: string }>;
+        };
+      }>;
+    };
+  }>;
+}
+
+/**
+ * The fungible balances of a global entity, one entry per resource and vault. The Gateway's
+ * details endpoint answers a component's holdings aggregated by resource by default; a
+ * distribution's remainder and a treasury's parked-refund vaults are both read this way.
+ */
+export async function readFungibleHoldings(
+  gateway: Gateway,
+  holder: string,
+): Promise<FungibleHolding[]> {
+  let answer: EntityFungiblesAnswer;
+  try {
+    answer = await gateway.post<EntityFungiblesAnswer>("/state/entity/details", {
+      addresses: [holder],
+    });
+  } catch (error) {
+    if (error instanceof GatewayError && error.status === 404) return [];
+    throw error;
+  }
+
+  const holdings: FungibleHolding[] = [];
+  for (const item of answer.items?.[0]?.fungible_resources?.items ?? []) {
+    const resource = item.resource_address;
+    if (typeof resource !== "string") continue;
+    if (typeof item.amount === "string") {
+      holdings.push({ resource, amount: item.amount });
+      continue;
+    }
+    for (const vault of item.vaults?.items ?? []) {
+      if (typeof vault.amount === "string") {
+        holdings.push({ resource, amount: vault.amount });
+      }
+    }
+  }
+  return holdings;
 }
 
 interface NonFungiblePage {

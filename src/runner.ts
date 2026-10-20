@@ -16,6 +16,7 @@ import * as noop from "./jobs/noop.ts";
 import * as openReveal from "./jobs/open-reveal.ts";
 import * as openVote from "./jobs/open-vote.ts";
 import * as redeemBonds from "./jobs/redeem-bonds.ts";
+import * as settle from "./jobs/settle.ts";
 
 export interface JobContext {
   config: KeeperConfig;
@@ -45,6 +46,7 @@ export const JOBS: readonly RegisteredJob[] = [
   { name: "open_reveal", findWork: openReveal.findWork, act: openReveal.act },
   { name: "open_vote", findWork: openVote.findWork, act: openVote.act },
   { name: "burn_seat", findWork: burnSeat.findWork, act: burnSeat.act },
+  { name: "settle", findWork: settle.findWork, act: settle.act },
   { name: "redeem_own_bonds", findWork: redeemBonds.findWork, act: redeemBonds.act },
   { name: "noop", findWork: noop.findWork, act: noop.act },
 ];
