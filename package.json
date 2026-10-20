@@ -16,7 +16,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@noble/hashes": "^1.7.1",
     "@radixdlt/radix-engine-toolkit": "^1.0.5",
+    "radix-tally-verify": "file:../radix-tally-verify",
     "smol-toml": "^1.9.1"
   },
   "devDependencies": {

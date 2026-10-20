@@ -11,6 +11,7 @@ import type { Gateway } from "./gateway.ts";
 import type { StateFile } from "./state.ts";
 import type { Executor, Logger, Outcome } from "./tx.ts";
 import * as burnSeat from "./jobs/burn-seat.ts";
+import * as dispute from "./jobs/dispute.ts";
 import * as finalize from "./jobs/finalize.ts";
 import * as noop from "./jobs/noop.ts";
 import * as openReveal from "./jobs/open-reveal.ts";
@@ -25,6 +26,8 @@ export interface JobContext {
   executor: Executor;
   state: StateFile;
   logger: Logger;
+  /** HTTP fetch for the platform's public API; tests inject one, production uses the global. */
+  fetchImpl?: typeof fetch;
 }
 
 export interface WorkItem {
@@ -39,6 +42,11 @@ export interface JobModule {
 
 export interface RegisteredJob extends JobModule {
   name: string;
+  /**
+   * Run even when the job's `enabled` flag is false. The dispute watcher uses this: `enabled`
+   * there gates the bond-spending path only, and a mismatch it finds is reported either way.
+   */
+  runWhenDisabled?: boolean;
 }
 
 export const JOBS: readonly RegisteredJob[] = [
@@ -48,8 +56,18 @@ export const JOBS: readonly RegisteredJob[] = [
   { name: "burn_seat", findWork: burnSeat.findWork, act: burnSeat.act },
   { name: "settle", findWork: settle.findWork, act: settle.act },
   { name: "redeem_own_bonds", findWork: redeemBonds.findWork, act: redeemBonds.act },
+  {
+    name: "dispute",
+    findWork: dispute.findWork,
+    act: dispute.act,
+    runWhenDisabled: true,
+  },
   { name: "noop", findWork: noop.findWork, act: noop.act },
 ];
+
+export function jobRuns(context: JobContext, job: RegisteredJob): boolean {
+  return job.runWhenDisabled === true || resolvedJobConfig(context.config, job.name).enabled;
+}
 
 export interface RunRecord {
   job: string;
@@ -84,7 +102,7 @@ export class Runner {
   async once(): Promise<RunRecord[]> {
     const records: RunRecord[] = [];
     for (const job of this.jobs) {
-      if (!resolvedJobConfig(this.context.config, job.name).enabled) continue;
+      if (!jobRuns(this.context, job)) continue;
       records.push(...(await this.runJob(job)));
     }
     return records;
@@ -92,9 +110,7 @@ export class Runner {
 
   /** The long-running loop. Returns when `signal` aborts. */
   async run(signal?: AbortSignal): Promise<void> {
-    const enabled = this.jobs.filter(
-      (job) => resolvedJobConfig(this.context.config, job.name).enabled,
-    );
+    const enabled = this.jobs.filter((job) => jobRuns(this.context, job));
     if (enabled.length === 0) {
       this.context.logger.info("no jobs are enabled");
       return;

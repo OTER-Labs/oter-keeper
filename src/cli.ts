@@ -30,7 +30,7 @@ import {
 } from "./discover.ts";
 import { Gateway, GatewayError, type GatewayStatus } from "./gateway.ts";
 import { Limits, parseXrd } from "./limits.ts";
-import { JOBS, Runner, type JobContext } from "./runner.ts";
+import { JOBS, Runner, jobRuns, type JobContext } from "./runner.ts";
 import { StateFile, StateError } from "./state.ts";
 import { consoleLogger, Executor } from "./tx.ts";
 
@@ -76,7 +76,14 @@ function printJobs(config: KeeperConfig): void {
   consoleLogger.info("jobs:");
   for (const name of names) {
     const job = resolvedJobConfig(config, name);
-    const state = job.enabled ? "enabled" : "disabled";
+    const state =
+      name === "dispute"
+        ? job.enabled
+          ? "enabled (bond spending on)"
+          : "reports only (bond spending off)"
+        : job.enabled
+          ? "enabled"
+          : "disabled";
     consoleLogger.info(`  ${name}: ${state}, every ${job.interval_secs}s`);
   }
 }
@@ -108,7 +115,7 @@ async function printWork(
 
   consoleLogger.info("would do (nothing is built or submitted):");
   for (const job of JOBS) {
-    if (!resolvedJobConfig(config, job.name).enabled) {
+    if (!jobRuns(context, job)) {
       consoleLogger.info(`  ${job.name}: disabled`);
       continue;
     }
@@ -200,8 +207,9 @@ async function runKeeper(
   env: NodeJS.ProcessEnv,
 ): Promise<number> {
   const config = loadConfig(configPath);
+  const disputesOn = resolvedJobConfig(config, "dispute").enabled;
   consoleLogger.info(
-    `dry run: ${config.live_submit ? "no (live_submit = true)" : "yes (live_submit = false)"}`,
+    `dry run: ${config.live_submit ? "no (live_submit = true)" : "yes (live_submit = false)"}; disputes: ${disputesOn ? "on" : "off (mismatches are reported only)"}`,
   );
 
   const key = loadKey(config, env);

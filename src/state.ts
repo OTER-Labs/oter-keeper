@@ -22,6 +22,8 @@ interface StateData {
   cursors: Record<string, number>;
   /** Day (UTC, YYYY-MM-DD) to atto-XRD spent that day, as a decimal string. */
   fees: Record<string, string>;
+  /** Day (UTC, YYYY-MM-DD) to disputes submitted that day. */
+  disputes: Record<string, number>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -61,7 +63,22 @@ function parseData(text: string, path: string): StateData {
     }
   }
 
-  return { version: 1, cursors, fees };
+  const disputes: Record<string, number> = {};
+  if (isRecord(raw.disputes)) {
+    for (const [day, value] of Object.entries(raw.disputes)) {
+      if (
+        !/^\d{4}-\d{2}-\d{2}$/.test(day) ||
+        typeof value !== "number" ||
+        !Number.isInteger(value) ||
+        value < 0
+      ) {
+        throw new StateError(`state file ${path} has an invalid dispute entry`);
+      }
+      disputes[day] = value;
+    }
+  }
+
+  return { version: 1, cursors, fees, disputes };
 }
 
 export class StateFile {
@@ -75,7 +92,7 @@ export class StateFile {
 
   static load(path: string = DEFAULT_STATE_PATH): StateFile {
     if (!existsSync(path)) {
-      return new StateFile(path, { version: 1, cursors: {}, fees: {} });
+      return new StateFile(path, { version: 1, cursors: {}, fees: {}, disputes: {} });
     }
     let text: string;
     try {
@@ -108,6 +125,17 @@ export class StateFile {
   addSpend(day: string, attos: bigint): void {
     if (attos < 0n) throw new StateError("a spend cannot be negative");
     this.data.fees[day] = (this.spent(day) + attos).toString();
+    this.save();
+  }
+
+  /** Disputes submitted on `day` (UTC, YYYY-MM-DD). */
+  disputesToday(day: string): number {
+    return this.data.disputes[day] ?? 0;
+  }
+
+  /** Record one dispute as submitted. A bond posted outside this keeper is not counted. */
+  addDispute(day: string): void {
+    this.data.disputes[day] = this.disputesToday(day) + 1;
     this.save();
   }
 

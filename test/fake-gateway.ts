@@ -24,6 +24,7 @@ export type ReplySource = Reply | ((request: RecordedRequest) => Reply | Promise
 export class FakeHttp {
   readonly calls: RecordedRequest[] = [];
   private readonly replies = new Map<string, ReplySource[]>();
+  private readonly persistent = new Map<string, ReplySource>();
   private inFlight = 0;
   maxInFlight = 0;
 
@@ -32,6 +33,12 @@ export class FakeHttp {
     const queue = this.replies.get(key) ?? [];
     queue.push(reply);
     this.replies.set(key, queue);
+    return this;
+  }
+
+  /** Register an answer used for every matching request, in any number. */
+  always(key: string, reply: ReplySource): this {
+    this.persistent.set(key, reply);
     return this;
   }
 
@@ -73,6 +80,10 @@ export class FakeHttp {
   };
 
   private take(url: string, path: string): ReplySource {
+    for (const key of [url, path]) {
+      const recurring = this.persistent.get(key);
+      if (recurring !== undefined) return recurring;
+    }
     for (const key of [url, path]) {
       const queue = this.replies.get(key);
       const reply = queue?.shift();
