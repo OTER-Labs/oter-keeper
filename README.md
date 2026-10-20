@@ -184,7 +184,7 @@ window's minimum epoch. The keeper applies both conditions before it acts on a w
 | `open_reveal` | A round has committed ballots past its reveal start and no reveal has opened | oracle `open_reveal_window` | network fee |
 | `open_vote` | A delayed vote is past its start and has no recorded opening | registry `open_vote` | network fee |
 | `burn_seat` | A seat is revoked or its term has ended and it has not been burned | registry `burn_seat` | network fee |
-| `settle` | A distribution or grant meets its conditions | hub `settle_distribution`, `settle_grant`, `collect_grant_refunds`; distribution `return_unclaimed`; escrow `deliver_fallback` | network fee per call |
+| `settle` | A distribution or grant meets its conditions | space treasury `settle_distribution`, `settle_grant`, `collect_grant_refunds`; distribution `return_unclaimed`; escrow `deliver_fallback` | network fee per call |
 | `redeem_own_bonds` | The configured account holds a bond ticket | oracle `redeem_bond_ticket` | network fee |
 | `dispute` | A tally assertion does not verify, disputes are on, and every bond limit allows it | identifier `dispute_resolution` or `dispute_election_result` | network fee plus the bond |
 
