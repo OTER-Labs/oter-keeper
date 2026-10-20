@@ -1,0 +1,26 @@
+{
+  "name": "oter-keeper",
+  "version": "0.1.0",
+  "description": "Community keeper for OTER public calls and tally checks, reading only the Radix Gateway.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "oter-keeper": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test --experimental-strip-types test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@radixdlt/radix-engine-toolkit": "^1.0.5",
+    "smol-toml": "^1.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

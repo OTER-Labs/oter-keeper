@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.oter-keeper/
+.DS_Store
+key.hex
+*.key

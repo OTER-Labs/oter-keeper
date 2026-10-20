@@ -1,0 +1,13 @@
+network = "stokenet"
+dapp_definition = "account_tdx_2_129x5uj99s5aka9ctqevg3zp8uyz03x6nfy3lghjfne73py0r0w077x"
+account = "account_tdx_2_129x5uj99s5aka9ctqevg3zp8uyz03x6nfy3lghjfne73py0r0w077x"
+key_env = "OTER_KEEPER_KEY"
+gateways = ["https://stokenet.radixdlt.com"]
+live_submit = false
+max_fee_xrd_per_tx = 0.1
+max_fee_xrd_per_day = 1.0
+reserve_floor_xrd = 1.0
+
+[jobs.noop]
+enabled = true
+interval_secs = 60
