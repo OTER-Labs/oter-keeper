@@ -684,3 +684,26 @@ test("dispute: a mirror mismatch is reported and never builds a transaction", as
   assert.equal(http.count("/transaction/preview"), 0);
   assert.ok(ctx.logger.warnMessages.some((message) => /mirror proposal 7: MISMATCH/.test(message)));
 });
+
+test("dispute: a mirror's network is read from its ballot source", () => {
+  assert.equal(
+    dispute.mirrorNetwork({
+      document: {
+        ballot_source: {
+          component: "component_rdx1cp90ys553uwxuckev249x5wezucqru0u4qr7qdxdc9tlpmnh93242k",
+        },
+      },
+    }),
+    "mainnet",
+  );
+  assert.equal(
+    dispute.mirrorNetwork({
+      ballot_source: {
+        component: "component_tdx_2_1crq9skpe0wzpg0ef6j5cvfs8ms9znp09kagtfkxyxdynxtdcprzeqh",
+      },
+    }),
+    "stokenet",
+  );
+  assert.equal(dispute.mirrorNetwork({ votes: [] }), null);
+  assert.equal(dispute.mirrorNetwork(null), null);
+});

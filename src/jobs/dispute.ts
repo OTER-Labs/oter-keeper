@@ -46,9 +46,14 @@ import {
   type TallyDocument,
 } from "radix-tally-verify";
 
-import { XRD_RESOURCES, type DisputeJobConfig } from "../config.ts";
+import {
+  PUBLIC_GATEWAYS,
+  XRD_RESOURCES,
+  type DisputeJobConfig,
+  type NetworkName,
+} from "../config.ts";
 import { streamEvents, type LedgerEvent } from "../events.ts";
-import { GatewayError, type Gateway } from "../gateway.ts";
+import { Gateway, GatewayError } from "../gateway.ts";
 import { formatXrd, parseXrd, utcDay } from "../limits.ts";
 import {
   fieldEntry,
@@ -297,6 +302,24 @@ async function scanStreams(context: JobContext, streams: Stream[]): Promise<Scan
     }
   }
   return scan;
+}
+
+/**
+ * The network an official vote's ballots live on, read from the document's ballot source.
+ * The official Radix DAO is on mainnet, so a keeper configured for Stokenet still checks its
+ * mirror tallies against mainnet. Null when the document names no recognisable address.
+ */
+export function mirrorNetwork(document: unknown): NetworkName | null {
+  const root =
+    typeof document === "object" && document !== null && "document" in document
+      ? (document as { document: unknown }).document
+      : document;
+  const source = (root as { ballot_source?: { component?: unknown } } | null)?.ballot_source;
+  const component = source?.component;
+  if (typeof component !== "string") return null;
+  if (component.startsWith("component_rdx1")) return "mainnet";
+  if (component.startsWith("component_tdx_2_1")) return "stokenet";
+  return null;
 }
 
 /** A client for the Gateway slice `radix-tally-verify` reads. */
@@ -700,8 +723,20 @@ async function checkMirrors(
     return;
   }
 
-  const client = tallyGateway(context.gateway);
-  const xrd = XRD_RESOURCES[context.config.network];
+  // One client per network. The configured network uses the configured Gateways; another
+  // network (mainnet, for the official DAO seen from a Stokenet keeper) uses its public Gateway.
+  const clients = new Map<NetworkName, GatewayClient>();
+  clients.set(context.config.network, tallyGateway(context.gateway));
+  const clientFor = (network: NetworkName): GatewayClient => {
+    let client = clients.get(network);
+    if (client === undefined) {
+      client = tallyGateway(
+        new Gateway([PUBLIC_GATEWAYS[network]], network, { fetchImpl }),
+      );
+      clients.set(network, client);
+    }
+    return client;
+  };
   const day = utcDay(new Date());
   for (const row of mirrorRows(listing)) {
     const id = String(row.official_id);
@@ -742,7 +777,13 @@ async function checkMirrors(
     let outcome: VerifyOutcome;
     try {
       // No on-ledger hash exists for an official vote, so only the figures are checked.
-      outcome = await verifyTallyDocument(document, null, client, xrd);
+      const network = mirrorNetwork(document) ?? context.config.network;
+      outcome = await verifyTallyDocument(
+        document,
+        null,
+        clientFor(network),
+        XRD_RESOURCES[network],
+      );
     } catch (error) {
       context.logger.warn(
         `[dispute] mirror ${row.kind} ${id}: verification failed: ${(error as Error).message}`,
