@@ -14,6 +14,8 @@ import { Executor } from "../src/tx.ts";
 import * as finalize from "../src/jobs/finalize.ts";
 import * as openReveal from "../src/jobs/open-reveal.ts";
 import * as redeemBonds from "../src/jobs/redeem-bonds.ts";
+import * as burnSeat from "../src/jobs/burn-seat.ts";
+import * as openVote from "../src/jobs/open-vote.ts";
 import { FakeHttp, makeGateway, statusBody, type Reply } from "./fake-gateway.ts";
 import { MemoryLogger, tempDir } from "./helpers.ts";
 
@@ -22,6 +24,11 @@ const OTHER_ACCOUNT = "account_tdx_2_128w4g8w8g60tyg4edfu7pqcdcft5m0v4gmfhew2la3
 const ORACLE = "component_tdx_2_1cz0g28zn8yrypku7643stnrkq9gvejtquvxpwp40pvqhptajn39cxp";
 const TICKET_RESOURCE =
   "resource_tdx_2_1n242favr7z7404levdfhkww7sghpsftlqn06wdnzxxewy0mhyw6s0y";
+const REGISTRY = ORACLE;
+const SEAT_RESOURCE = TICKET_RESOURCE;
+const SEAT_VAULT =
+  "internal_vault_tdx_2_1nzfsaxa4sdx0l55x05yf9zuz80wt9em092xmzvnj6t8rryvhsu6wat";
+const ELECTION = "election1";
 const KEY = new PrivateKey.Ed25519(new Uint8Array(32).fill(0x22));
 
 const CONFIG: KeeperConfig = {
@@ -37,10 +44,13 @@ const CONFIG: KeeperConfig = {
   jobs: {},
 };
 
-function components(oracle: string | null = ORACLE): Components {
+function components(
+  oracle: string | null = ORACLE,
+  registry: string | null = null,
+): Components {
   return {
     oracle,
-    registry: null,
+    registry,
     identifierConsultation: null,
     identifierElection: null,
     identifierGovernance: null,
@@ -64,6 +74,7 @@ interface ContextOptions {
   liveSubmit?: boolean;
   preview?: Reply;
   oracle?: string | null;
+  registry?: string | null;
 }
 
 function context(http: FakeHttp, options: ContextOptions = {}): JobContext {
@@ -97,7 +108,10 @@ function context(http: FakeHttp, options: ContextOptions = {}): JobContext {
   return {
     config: CONFIG,
     gateway,
-    components: components(options.oracle === undefined ? ORACLE : options.oracle),
+    components: components(
+      options.oracle === undefined ? ORACLE : options.oracle,
+      options.registry === undefined ? null : options.registry,
+    ),
     executor,
     state,
     logger: new MemoryLogger(),
@@ -309,7 +323,7 @@ test("finalize: a refused preview is not an error", async () => {
 // open_reveal
 // ---------------------------------------------------------------------------
 
-function schedule(start: number, period = 180): unknown {
+function schedule(start: number, period = 600): unknown {
   return event("RequestScheduledForVotingEvent", [
     field("request_id", "r1"),
     field("resolution_attempt", 1, "U32"),
@@ -391,6 +405,340 @@ test("open_reveal: a dry run never submits and a refused preview is not an error
   );
   assert.equal(refused.count("/transaction/submit"), 0);
   assert.deepEqual((refusedCtx.logger as MemoryLogger).errorMessages, []);
+});
+
+test("open_reveal: a reveal period under 375 seconds needs no stamp and is skipped", async () => {
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([schedule(nowSeconds() - 10, 300), commit()]),
+  );
+  const ctx = context(http);
+
+  assert.deepEqual(await openReveal.findWork(ctx), []);
+  assert.ok(
+    (ctx.logger as MemoryLogger).infoMessages.includes("[open_reveal] nothing to open"),
+  );
+});
+
+// ---------------------------------------------------------------------------
+// open_vote
+// ---------------------------------------------------------------------------
+
+function consultation(
+  id: string,
+  voteStart: number,
+  voteEnd: number,
+  created: number,
+  startMinEpoch = 0,
+  endMinEpoch = 0,
+): unknown {
+  return event("ConsultationCreatedEvent", [
+    field("consultation_id", id),
+    field("vote_start", voteStart, "I64"),
+    field("vote_end", voteEnd, "I64"),
+    field("timestamp", created, "I64"),
+    field("vote_start_min_epoch", startMinEpoch, "U64"),
+    field("vote_end_min_epoch", endMinEpoch, "U64"),
+  ]);
+}
+
+function voteOpened(id: string): unknown {
+  return event("VoteOpenedEvent", [
+    field("consultation_id", id),
+    field("vote_open_epoch", 10, "U64"),
+    field("vote_end_min_epoch", 10, "U64"),
+    field("timestamp", nowSeconds() - 5, "I64"),
+  ]);
+}
+
+function voteCast(id: string): unknown {
+  return event("VoteCastEvent", [
+    field("consultation_id", id),
+    field("account", ACCOUNT, "Reference"),
+    field("selection", [], "Array"),
+  ]);
+}
+
+function voteContext(http: FakeHttp, options: ContextOptions = {}): JobContext {
+  return context(http, { registry: REGISTRY, ...options });
+}
+
+test("open_vote: a delayed vote past the grace, the clock and the floor is due", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([consultation("c1", now - 600, now + 3_600, now - 86_400, 10, 20)]),
+  );
+
+  const work = await openVote.findWork(voteContext(http));
+  assert.equal(work.length, 1);
+  assert.equal(work[0]?.id, "c1");
+  assert.equal(work[0]?.consultation_id, "c1");
+});
+
+test("open_vote: a vote held by its start floor is not due", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([consultation("c1", now - 600, now + 3_600, now - 86_400, 11)]),
+  );
+
+  assert.deepEqual(await openVote.findWork(voteContext(http, { epoch: 10 })), []);
+});
+
+test("open_vote: a vote within its grace period is not due", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([consultation("c1", now - 30, now + 3_600, now - 86_400)]),
+  );
+
+  assert.deepEqual(await openVote.findWork(voteContext(http)), []);
+});
+
+test("open_vote: a vote whose opening is recorded is not due", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([
+      consultation("c1", now - 600, now + 3_600, now - 86_400),
+      voteOpened("c1"),
+    ]),
+  );
+
+  assert.deepEqual(await openVote.findWork(voteContext(http)), []);
+});
+
+test("open_vote: a vote that already has a ballot is not due", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([
+      consultation("c1", now - 600, now + 3_600, now - 86_400),
+      voteCast("c1"),
+    ]),
+  );
+
+  assert.deepEqual(await openVote.findWork(voteContext(http)), []);
+});
+
+test("open_vote: a vote closed under the live-time rule is not due", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([consultation("c1", now - 600, now - 10, now - 86_400, 0, 10)]),
+  );
+
+  assert.deepEqual(await openVote.findWork(voteContext(http, { epoch: 10 })), []);
+});
+
+test("open_vote: a vote with no start delay needs nothing", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([consultation("c1", now - 600, now + 3_600, now - 600)]),
+  );
+
+  assert.deepEqual(await openVote.findWork(voteContext(http)), []);
+});
+
+test("open_vote: a dry run previews open_vote and never submits", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([consultation("c1", now - 600, now + 3_600, now - 86_400)]),
+  );
+  http.on("/transaction/preview", { body: { receipt: { status: "Succeeded" } } });
+  const ctx = voteContext(http);
+
+  const [item] = await openVote.findWork(ctx);
+  assert.notEqual(item, undefined);
+  assert.equal(await openVote.act(ctx, item!), "dry_run");
+  const preview = http.bodies("/transaction/preview")[0] as { manifest: string };
+  assert.match(preview.manifest, /open_vote/);
+  assert.ok(preview.manifest.includes("c1"));
+  assert.equal(http.count("/transaction/submit"), 0);
+});
+
+// ---------------------------------------------------------------------------
+// burn_seat
+// ---------------------------------------------------------------------------
+
+function spaceCreated(spaceId = 7): unknown {
+  return event("SpaceCreatedEvent", [
+    field("space_id", spaceId, "U32"),
+    field("seat_resource", SEAT_RESOURCE, "Reference"),
+  ]);
+}
+
+function seatsSealed(termEnd: number, electionId = ELECTION): unknown {
+  return event("ElectionSeatsSealedEvent", [
+    field("election_id", electionId),
+    field("space_id", 7, "U32"),
+    field("term_end", termEnd, "I64"),
+  ]);
+}
+
+function seatClaimed(holder = OTHER_ACCOUNT, seatIndex = 0): unknown {
+  return event("SeatClaimedEvent", [
+    field("election_id", ELECTION),
+    field("seat_index", seatIndex, "U32"),
+    field("holder", holder, "Reference"),
+    field("local_id", "<election1_0>"),
+    field("space_id", 7, "U32"),
+  ]);
+}
+
+function seatRevoked(burned: boolean, seatIndex = 0): unknown {
+  return event("SeatRevokedEvent", [
+    field("election_id", ELECTION),
+    field("seat_index", seatIndex, "U32"),
+    field("space_id", 7, "U32"),
+    field("recall_consultation_id", "recall1"),
+    field("burned", burned, "Bool"),
+  ]);
+}
+
+function seatBurned(seatIndex = 0): unknown {
+  return event("SeatBurnedEvent", [
+    field("election_id", ELECTION),
+    field("seat_index", seatIndex, "U32"),
+    field("space_id", 7, "U32"),
+    field("local_id", "<election1_0>"),
+  ]);
+}
+
+function vaultReply(vault: string | null): Reply {
+  return {
+    body: { items: vault === null ? [] : [{ vault_address: vault }], next_cursor: null },
+  };
+}
+
+function burnContext(http: FakeHttp, options: ContextOptions = {}): JobContext {
+  return context(http, { registry: REGISTRY, ...options });
+}
+
+test("burn_seat: a revoked seat with an unburned badge is due", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([
+      spaceCreated(),
+      seatsSealed(now + 86_400),
+      seatClaimed(),
+      seatRevoked(false),
+    ]),
+  );
+  http.on("/state/entity/page/non-fungible-vaults", vaultReply(SEAT_VAULT));
+
+  const work = await burnSeat.findWork(burnContext(http));
+  assert.equal(work.length, 1);
+  assert.equal(work[0]?.id, `${ELECTION}:0`);
+  assert.equal(work[0]?.holder_vault, SEAT_VAULT);
+});
+
+test("burn_seat: a seat past its term is due", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([spaceCreated(), seatsSealed(now - 1), seatClaimed()]),
+  );
+  http.on("/state/entity/page/non-fungible-vaults", vaultReply(SEAT_VAULT));
+
+  const work = await burnSeat.findWork(burnContext(http));
+  assert.equal(work.length, 1);
+});
+
+test("burn_seat: a seat already burned is not due", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([
+      spaceCreated(),
+      seatsSealed(now - 1),
+      seatClaimed(),
+      seatBurned(),
+    ]),
+  );
+
+  assert.deepEqual(await burnSeat.findWork(burnContext(http)), []);
+});
+
+test("burn_seat: a revocation that burned the badge needs no call", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([
+      spaceCreated(),
+      seatsSealed(now + 86_400),
+      seatClaimed(),
+      seatRevoked(true),
+    ]),
+  );
+
+  assert.deepEqual(await burnSeat.findWork(burnContext(http)), []);
+});
+
+test("burn_seat: a holder with no vault is reported and skipped", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([
+      spaceCreated(),
+      seatsSealed(now + 86_400),
+      seatClaimed(),
+      seatRevoked(false),
+    ]),
+  );
+  http.on("/state/entity/page/non-fungible-vaults", vaultReply(null));
+  const ctx = burnContext(http);
+
+  assert.deepEqual(await burnSeat.findWork(ctx), []);
+  assert.ok(
+    (ctx.logger as MemoryLogger).warnMessages.some((message) =>
+      message.includes("holds no vault"),
+    ),
+  );
+});
+
+test("burn_seat: a dry run previews burn_seat with the holder vault and never submits", async () => {
+  const now = nowSeconds();
+  const http = new FakeHttp();
+  http.on(
+    "/stream/transactions",
+    stream([
+      spaceCreated(),
+      seatsSealed(now + 86_400),
+      seatClaimed(),
+      seatRevoked(false),
+    ]),
+  );
+  http.on("/state/entity/page/non-fungible-vaults", vaultReply(SEAT_VAULT));
+  http.on("/transaction/preview", { body: { receipt: { status: "Succeeded" } } });
+  const ctx = burnContext(http);
+
+  const [item] = await burnSeat.findWork(ctx);
+  assert.notEqual(item, undefined);
+  assert.equal(await burnSeat.act(ctx, item!), "dry_run");
+  const preview = http.bodies("/transaction/preview")[0] as { manifest: string };
+  assert.match(preview.manifest, /burn_seat/);
+  assert.ok(preview.manifest.includes(ELECTION));
+  assert.ok(preview.manifest.includes(SEAT_VAULT));
+  assert.equal(http.count("/transaction/submit"), 0);
 });
 
 // ---------------------------------------------------------------------------

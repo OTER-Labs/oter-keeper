@@ -58,7 +58,11 @@ export interface ExplicitComponents {
 
 export interface KeeperConfig {
   network: NetworkName;
-  dapp_definition: string;
+  /**
+   * The dApp definition account discovery reads. Required only when `[components]` is absent:
+   * a table that names the components needs no discovery.
+   */
+  dapp_definition?: string;
   gateways: string[];
   account: string;
   components?: ExplicitComponents;
@@ -276,11 +280,23 @@ export function loadConfig(path: string): KeeperConfig {
     throw new ConfigError('`network` must be "stokenet" or "mainnet"');
   }
 
-  const dappDefinition = requireAccountAddress(
-    requireString(table, "dapp_definition"),
-    "dapp_definition",
-    network,
-  );
+  const components = parseComponents(table.components, network);
+
+  let dappDefinition: string | undefined;
+  if (table.dapp_definition === undefined) {
+    if (components === undefined) {
+      throw new ConfigError(
+        "`dapp_definition` is required when there is no `[components]` table: discovery reads its claimed entities",
+      );
+    }
+  } else {
+    dappDefinition = requireAccountAddress(
+      requireString(table, "dapp_definition"),
+      "dapp_definition",
+      network,
+    );
+  }
+
   const account = requireAccountAddress(
     requireString(table, "account"),
     "account",
@@ -335,11 +351,10 @@ export function loadConfig(path: string): KeeperConfig {
   }
 
   const jobs = parseJobs(table.jobs);
-  const components = parseComponents(table.components, network);
 
   return {
     network,
-    dapp_definition: dappDefinition,
+    ...(dappDefinition === undefined ? {} : { dapp_definition: dappDefinition }),
     gateways,
     account,
     ...(components === undefined ? {} : { components }),

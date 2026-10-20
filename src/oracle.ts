@@ -258,6 +258,37 @@ export async function listAccountNonFungibles(
   throw new GatewayError(`the gateway returned too many non-fungible pages for ${account}`);
 }
 
+interface NonFungibleVaultPage {
+  items?: Array<{ vault_address?: string }>;
+}
+
+/**
+ * The internal address of the vault in which `holder` keeps `resource`, or null when it holds
+ * no vault of it. An account keeps at most one vault per resource; a component holder may keep
+ * more, and the first is returned. An entity the ledger has never seen holds nothing.
+ */
+export async function findNonFungibleVault(
+  gateway: Gateway,
+  holder: string,
+  resource: string,
+): Promise<string | null> {
+  let answer: NonFungibleVaultPage;
+  try {
+    answer = await gateway.post<NonFungibleVaultPage>(
+      "/state/entity/page/non-fungible-vaults",
+      { address: holder, resource_address: resource },
+    );
+  } catch (error) {
+    if (error instanceof GatewayError && error.status === 404) return null;
+    throw error;
+  }
+  for (const item of answer.items ?? []) {
+    const vault = item.vault_address;
+    if (typeof vault === "string" && vault.startsWith("internal_vault_")) return vault;
+  }
+  return null;
+}
+
 interface NonFungibleDataAnswer {
   non_fungible_ids?: Array<{
     non_fungible_id?: string;

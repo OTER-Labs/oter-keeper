@@ -9,7 +9,9 @@
  *
  * The call moves no funds and is idempotent on a stamped round. A refused preview means the
  * round was opened by someone else between the scan and the call; the next pass sees the
- * stamp and stops asking.
+ * stamp and stops asking. A reveal period under 375 seconds has no live-time floor, so a round
+ * with such a period is left alone: it closes on the deadline and a stamp would cost a fee for
+ * nothing.
  */
 
 import { i64 } from "@radixdlt/radix-engine-toolkit";
@@ -19,6 +21,7 @@ import {
   fieldNumber,
   fieldString,
   jsonFields,
+  minEpochsFor,
   nestedFields,
   nowSeconds,
   type JsonField,
@@ -160,6 +163,11 @@ export async function findWork(context: JobContext): Promise<WorkItem[]> {
       continue;
     }
     if (round.commits === 0) continue; // Nothing to reveal: the deadline is enough.
+    if (minEpochsFor(round.reveal_period) === 0) {
+      // A reveal period under 375 seconds carries no live-time floor, so there is no stamp
+      // worth paying a fee for: the round closes on its deadline.
+      continue;
+    }
     pending.push(round);
     work.push({
       id: String(round.vote_reveal_start),

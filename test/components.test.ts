@@ -27,6 +27,10 @@ ${extra}
 `;
 }
 
+function configTextWithoutDapp(extra: string): string {
+  return configText(extra).replace(`dapp_definition = "${ACCOUNT}"\n`, "");
+}
+
 function detailsReply(
   entries: Array<[string, string]>,
 ): { body: unknown } {
@@ -56,6 +60,29 @@ distributions = ["${DISTRIBUTION}"]
   assert.equal(config.components?.oracle, ORACLE);
   assert.equal(config.components?.registry, REGISTRY);
   assert.deepEqual(config.components?.space_treasuries, [TREASURY_A, TREASURY_B]);
+});
+
+test("a [components] table is enough without a dapp_definition", () => {
+  const path = writeTempFile(
+    "components-only.toml",
+    configTextWithoutDapp(`
+[components]
+oracle = "${ORACLE}"
+registry = "${REGISTRY}"
+`),
+  );
+  const config = loadConfig(path);
+  assert.equal(config.dapp_definition, undefined);
+  assert.equal(config.components?.oracle, ORACLE);
+  assert.equal(config.components?.registry, REGISTRY);
+});
+
+test("refuses a config with neither dapp_definition nor [components]", () => {
+  const path = writeTempFile("neither.toml", configTextWithoutDapp(""));
+  assert.throws(
+    () => loadConfig(path),
+    /`dapp_definition` is required when there is no `\[components\]` table/,
+  );
 });
 
 test("refuses an unknown [components] key and an address from another network", () => {

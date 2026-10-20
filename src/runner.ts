@@ -10,9 +10,11 @@ import type { Components } from "./discover.ts";
 import type { Gateway } from "./gateway.ts";
 import type { StateFile } from "./state.ts";
 import type { Executor, Logger, Outcome } from "./tx.ts";
+import * as burnSeat from "./jobs/burn-seat.ts";
 import * as finalize from "./jobs/finalize.ts";
 import * as noop from "./jobs/noop.ts";
 import * as openReveal from "./jobs/open-reveal.ts";
+import * as openVote from "./jobs/open-vote.ts";
 import * as redeemBonds from "./jobs/redeem-bonds.ts";
 
 export interface JobContext {
@@ -41,6 +43,8 @@ export interface RegisteredJob extends JobModule {
 export const JOBS: readonly RegisteredJob[] = [
   { name: "finalize", findWork: finalize.findWork, act: finalize.act },
   { name: "open_reveal", findWork: openReveal.findWork, act: openReveal.act },
+  { name: "open_vote", findWork: openVote.findWork, act: openVote.act },
+  { name: "burn_seat", findWork: burnSeat.findWork, act: burnSeat.act },
   { name: "redeem_own_bonds", findWork: redeemBonds.findWork, act: redeemBonds.act },
   { name: "noop", findWork: noop.findWork, act: noop.act },
 ];

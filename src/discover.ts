@@ -384,6 +384,11 @@ export async function resolveComponents(
       source: "config",
     };
   }
+  if (config.dapp_definition === undefined) {
+    throw new ConfigError(
+      "discovery needs `dapp_definition`; a config without it must name its components in a `[components]` table",
+    );
+  }
   return {
     components: await discoverComponents(gateway, config.dapp_definition),
     source: "discovered",

@@ -152,7 +152,9 @@ async function check(configPath: string, env: NodeJS.ProcessEnv): Promise<number
   consoleLogger.info(`config: ${configPath}`);
   consoleLogger.info(`network: ${config.network}`);
   consoleLogger.info(`account: ${config.account}`);
-  consoleLogger.info(`dapp definition: ${config.dapp_definition}`);
+  consoleLogger.info(
+    `dapp definition: ${config.dapp_definition ?? "none (the [components] table is used)"}`,
+  );
   consoleLogger.info(`key: ${describeKey(config, env)}`);
 
   const gateway = new Gateway(config.gateways, config.network);
