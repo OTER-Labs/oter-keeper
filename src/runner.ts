@@ -10,7 +10,10 @@ import type { Components } from "./discover.ts";
 import type { Gateway } from "./gateway.ts";
 import type { StateFile } from "./state.ts";
 import type { Executor, Logger, Outcome } from "./tx.ts";
+import * as finalize from "./jobs/finalize.ts";
 import * as noop from "./jobs/noop.ts";
+import * as openReveal from "./jobs/open-reveal.ts";
+import * as redeemBonds from "./jobs/redeem-bonds.ts";
 
 export interface JobContext {
   config: KeeperConfig;
@@ -36,6 +39,9 @@ export interface RegisteredJob extends JobModule {
 }
 
 export const JOBS: readonly RegisteredJob[] = [
+  { name: "finalize", findWork: finalize.findWork, act: finalize.act },
+  { name: "open_reveal", findWork: openReveal.findWork, act: openReveal.act },
+  { name: "redeem_own_bonds", findWork: redeemBonds.findWork, act: redeemBonds.act },
   { name: "noop", findWork: noop.findWork, act: noop.act },
 ];
 

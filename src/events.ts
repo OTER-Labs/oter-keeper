@@ -64,7 +64,9 @@ export async function* streamEvents(
       opt_ins: { receipt_events: true },
     };
     if (cursor === null) {
-      body.from_ledger_state = { state_version: fromStateVersion };
+      // Ledger state versions start at 1; the Gateway answers an empty page for 0, which
+      // would silently skip the beginning of a component's history.
+      body.from_ledger_state = { state_version: Math.max(1, fromStateVersion) };
     } else {
       body.cursor = cursor;
     }

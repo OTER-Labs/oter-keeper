@@ -7,7 +7,9 @@
  * wrong; `run` and `once` refuse both.
  */
 
-import { resolve } from "node:path";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -21,10 +23,14 @@ import {
   resolvedJobConfig,
   type KeeperConfig,
 } from "./config.ts";
-import { discoverComponents, type Components } from "./discover.ts";
+import {
+  resolveComponents,
+  type ComponentSource,
+  type Components,
+} from "./discover.ts";
 import { Gateway, GatewayError, type GatewayStatus } from "./gateway.ts";
 import { Limits, parseXrd } from "./limits.ts";
-import { JOBS, Runner } from "./runner.ts";
+import { JOBS, Runner, type JobContext } from "./runner.ts";
 import { StateFile, StateError } from "./state.ts";
 import { consoleLogger, Executor } from "./tx.ts";
 
@@ -37,14 +43,16 @@ const USAGE = `Usage: oter-keeper <run|once|check> [--config keeper.toml]
 Dry run is the default: no transaction is submitted unless the config sets
 live_submit = true and every spending limit allows it.`;
 
-function printComponents(components: Components): void {
+function printComponents(components: Components, source: ComponentSource): void {
+  const origin =
+    source === "config"
+      ? "explicit (config [components] table)"
+      : "discovered from the dApp definition account";
   if (components.entities.length === 0) {
-    consoleLogger.info(
-      "components: none (the dApp definition account claims no entities)",
-    );
+    consoleLogger.info(`components: ${origin}: none`);
     return;
   }
-  consoleLogger.info(`components: ${components.entities.length} discovered`);
+  consoleLogger.info(`components: ${origin}: ${components.entities.length} known`);
   for (const entity of components.entities) {
     const blueprint = entity.blueprint ?? "unknown blueprint";
     const link =
@@ -70,6 +78,60 @@ function printJobs(config: KeeperConfig): void {
     const job = resolvedJobConfig(config, name);
     const state = job.enabled ? "enabled" : "disabled";
     consoleLogger.info(`  ${name}: ${state}, every ${job.interval_secs}s`);
+  }
+}
+
+/** `check` only asks each job what it would do; no transaction is built or signed. */
+const CHECK_EXECUTOR = {
+  run: async (): Promise<never> => {
+    throw new Error("check never submits a transaction");
+  },
+} as unknown as Executor;
+
+async function printWork(
+  config: KeeperConfig,
+  gateway: Gateway,
+  components: Components,
+): Promise<void> {
+  const statePath = join(
+    mkdtempSync(join(tmpdir(), "oter-keeper-check-")),
+    "state.json",
+  );
+  const context: JobContext = {
+    config,
+    gateway,
+    components,
+    executor: CHECK_EXECUTOR,
+    state: StateFile.load(statePath),
+    logger: consoleLogger,
+  };
+
+  consoleLogger.info("would do (nothing is built or submitted):");
+  for (const job of JOBS) {
+    if (!resolvedJobConfig(config, job.name).enabled) {
+      consoleLogger.info(`  ${job.name}: disabled`);
+      continue;
+    }
+    try {
+      const work = await job.findWork(context);
+      if (work.length === 0) {
+        consoleLogger.info(`  ${job.name}: no work`);
+        continue;
+      }
+      consoleLogger.info(`  ${job.name}: ${work.length} item(s)`);
+      for (const item of work.slice(0, 5)) {
+        consoleLogger.info(`    ${String(item.summary ?? item.id)}`);
+      }
+      if (work.length > 5) {
+        consoleLogger.info(`    ... and ${work.length - 5} more`);
+      }
+    } catch (error) {
+      if (error instanceof GatewayError) {
+        consoleLogger.info(`  ${job.name}: unavailable (${error.message})`);
+        continue;
+      }
+      throw error;
+    }
   }
 }
 
@@ -110,9 +172,11 @@ async function check(configPath: string, env: NodeJS.ProcessEnv): Promise<number
     `gateway: ${config.gateways[0]} (${status.ledger_state.network}, state version ${status.ledger_state.state_version}, epoch ${status.ledger_state.epoch})`,
   );
 
+  let components: Components | null = null;
   try {
-    const components = await discoverComponents(gateway, config.dapp_definition);
-    printComponents(components);
+    const resolved = await resolveComponents(gateway, config);
+    components = resolved.components;
+    printComponents(resolved.components, resolved.source);
   } catch (error) {
     if (error instanceof GatewayError) {
       consoleLogger.info(`discovery failed: ${error.message}`);
@@ -121,6 +185,9 @@ async function check(configPath: string, env: NodeJS.ProcessEnv): Promise<number
     }
   }
 
+  if (components !== null) {
+    await printWork(config, gateway, components);
+  }
   printJobs(config);
   return 0;
 }
@@ -142,8 +209,8 @@ async function runKeeper(
     `network: ${config.network}, state version ${status.ledger_state.state_version}, epoch ${status.ledger_state.epoch}`,
   );
 
-  const components = await discoverComponents(gateway, config.dapp_definition);
-  printComponents(components);
+  const resolved = await resolveComponents(gateway, config);
+  printComponents(resolved.components, resolved.source);
 
   const state = StateFile.load();
   const limits = new Limits(state, {
@@ -165,7 +232,7 @@ async function runKeeper(
   const runner = new Runner({
     config,
     gateway,
-    components,
+    components: resolved.components,
     executor,
     state,
     logger: consoleLogger,

@@ -32,6 +32,12 @@ export interface Call {
 /** A manifest before the fee payer's lock-fee call is added by the executor. */
 export interface Manifest {
   readonly calls: readonly Call[];
+  /**
+   * For a manifest that needs instructions beyond one method call, such as moving a bucket
+   * through a component. When present it replaces `calls`; the executor has already added the
+   * lock-fee call to the builder it receives.
+   */
+  readonly build?: (builder: ManifestBuilder) => ManifestBuilder;
 }
 
 export function buildCall(
@@ -40,6 +46,13 @@ export function buildCall(
   args: Value[] = [],
 ): Manifest {
   return { calls: [{ component, method, args }] };
+}
+
+/** Wrap a sequence of manifest-builder steps as a Manifest. */
+export function buildManifest(
+  build: (builder: ManifestBuilder) => ManifestBuilder,
+): Manifest {
+  return { calls: [], build };
 }
 
 export type Outcome =
@@ -135,7 +148,9 @@ export class Executor {
     const preview = await this.preview(manifestString, header);
     if (preview.receipt?.status !== "Succeeded") {
       const reason = preview.receipt?.error_message ?? preview.receipt?.status ?? "no receipt";
-      this.logger.warn(`[${label}] preview refused: ${String(reason)}`);
+      // A refused preview is ordinary for a keeper: the work was taken by someone else, or
+      // the window has not closed yet. It is reported and retried, never treated as a failure.
+      this.logger.info(`[${label}] preview refused: ${String(reason)}`);
       return "previewed_refused";
     }
 
@@ -212,6 +227,9 @@ export class Executor {
     const builder = new ManifestBuilder().callMethod(this.options.account, "lock_fee", [
       decimal(formatXrd(this.options.maxFeePerTx)),
     ]);
+    if (manifest.build !== undefined) {
+      return manifest.build(builder).build();
+    }
     for (const call of manifest.calls) {
       builder.callMethod(call.component, call.method, [...call.args]);
     }

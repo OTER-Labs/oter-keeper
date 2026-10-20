@@ -41,11 +41,27 @@ export interface DisputeJobConfig extends JobConfig {
   tally_api?: string;
 }
 
+/**
+ * Components named by hand instead of discovered from the dApp definition's claimed entities.
+ * Every address given here is checked against the Gateway before it is used.
+ */
+export interface ExplicitComponents {
+  oracle?: string;
+  registry?: string;
+  consultation_identifier?: string;
+  election_identifier?: string;
+  hub?: string;
+  grant_escrow?: string;
+  space_treasuries?: string[];
+  distributions?: string[];
+}
+
 export interface KeeperConfig {
   network: NetworkName;
   dapp_definition: string;
   gateways: string[];
   account: string;
+  components?: ExplicitComponents;
   key_file?: string;
   key_env?: string;
   live_submit: boolean;
@@ -107,6 +123,79 @@ function requireAccountAddress(value: string, key: string, network: NetworkName)
     );
   }
   return value;
+}
+
+/** The prefix each network's component addresses carry. */
+function componentPrefix(network: NetworkName): string {
+  return network === "stokenet" ? "component_tdx_2_" : "component_rdx1";
+}
+
+function requireComponentAddress(value: string, key: string, network: NetworkName): string {
+  if (!value.startsWith(componentPrefix(network))) {
+    throw new ConfigError(
+      `\`components.${key}\` must be a ${network} component address (${componentPrefix(network)}...)`,
+    );
+  }
+  return value;
+}
+
+const COMPONENT_KEYS = [
+  "oracle",
+  "registry",
+  "consultation_identifier",
+  "election_identifier",
+  "hub",
+  "grant_escrow",
+  "space_treasuries",
+  "distributions",
+] as const;
+
+/**
+ * `[components]` names the watched components explicitly. Its presence turns discovery off,
+ * so a typo in a key must be refused rather than silently ignored.
+ */
+function parseComponents(
+  raw: unknown,
+  network: NetworkName,
+): ExplicitComponents | undefined {
+  if (raw === undefined) return undefined;
+  if (!isTable(raw)) {
+    throw new ConfigError("`components` must be a table");
+  }
+
+  for (const key of Object.keys(raw)) {
+    if (!(COMPONENT_KEYS as readonly string[]).includes(key)) {
+      throw new ConfigError(`unknown key \`components.${key}\``);
+    }
+  }
+
+  const components: ExplicitComponents = {};
+  for (const key of [
+    "oracle",
+    "registry",
+    "consultation_identifier",
+    "election_identifier",
+    "hub",
+    "grant_escrow",
+  ] as const) {
+    const value = optionalString(raw, key);
+    if (value !== undefined) {
+      components[key] = requireComponentAddress(value, key, network);
+    }
+  }
+
+  for (const key of ["space_treasuries", "distributions"] as const) {
+    const value = raw[key];
+    if (value === undefined) continue;
+    if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+      throw new ConfigError(`\`components.${key}\` must be an array of addresses`);
+    }
+    components[key] = value.map((entry) =>
+      requireComponentAddress(entry, key, network),
+    );
+  }
+
+  return components;
 }
 
 function parseJobs(raw: unknown): Record<string, JobConfig | DisputeJobConfig> {
@@ -246,12 +335,14 @@ export function loadConfig(path: string): KeeperConfig {
   }
 
   const jobs = parseJobs(table.jobs);
+  const components = parseComponents(table.components, network);
 
   return {
     network,
     dapp_definition: dappDefinition,
     gateways,
     account,
+    ...(components === undefined ? {} : { components }),
     ...(keyFile === undefined ? {} : { key_file: keyFile }),
     ...(keyEnv === undefined ? {} : { key_env: keyEnv }),
     live_submit: liveSubmit,
