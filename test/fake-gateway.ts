@@ -25,6 +25,7 @@ export class FakeHttp {
   readonly calls: RecordedRequest[] = [];
   private readonly replies = new Map<string, ReplySource[]>();
   private readonly persistent = new Map<string, ReplySource>();
+  private readonly lastStatus = new Map<string, ReplySource>();
   private inFlight = 0;
   maxInFlight = 0;
 
@@ -87,7 +88,19 @@ export class FakeHttp {
     for (const key of [url, path]) {
       const queue = this.replies.get(key);
       const reply = queue?.shift();
-      if (reply !== undefined) return reply;
+      if (reply !== undefined) {
+        this.lastStatus.set(key, reply);
+        return reply;
+      }
+    }
+    // The keeper reads the gateway status at start and again on every pass, for the current
+    // epoch. A status read has no side effects, so once its queue is spent the last answer
+    // stands for the rest of the test.
+    if (path === "/status/gateway-status") {
+      for (const key of [url, path]) {
+        const last = this.lastStatus.get(key);
+        if (last !== undefined) return last;
+      }
     }
     throw new Error(`unexpected request ${url}`);
   }

@@ -131,7 +131,7 @@ export async function findWork(context: JobContext): Promise<WorkItem[]> {
     return [];
   }
 
-  const status = await context.gateway.status();
+  const status = await context.gateway.ledgerStatus();
   const epoch = status.ledger_state.epoch;
   const now = nowSeconds();
   const cursorKey = `open_vote:${registry}`;

@@ -818,7 +818,7 @@ export async function findWork(context: JobContext): Promise<WorkItem[]> {
 
   const streams = streamsFor(context);
   const scan = streams.length === 0 ? emptyScan() : await scanStreams(context, streams);
-  const status = await context.gateway.status();
+  const status = await context.gateway.ledgerStatus();
   const now = nowSeconds();
   const epoch = status.ledger_state.epoch;
   const day = utcDay(new Date());

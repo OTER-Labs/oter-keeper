@@ -224,6 +224,21 @@ test("finalize: a passed deadline below the epoch floor is not due", async () =>
   assert.deepEqual(await finalize.findWork(ctx), []);
 });
 
+test("finalize: a long run sees the epoch move between passes", async () => {
+  // One Gateway for the life of the process, as in `run`: the floor is unmet on the first
+  // pass and met on the second, only because the network's epoch moved in between.
+  const http = new FakeHttp();
+  const ctx = context(http, { epoch: 10 });
+  http.on("/stream/transactions", stream([proposal("r1", nowSeconds() - 10, 11)]));
+  assert.deepEqual(await finalize.findWork(ctx), []);
+
+  http.on("/status/gateway-status", { body: statusBody("stokenet", 120, 11) });
+  http.on("/stream/transactions", stream([proposal("r1", nowSeconds() - 10, 11)]));
+  const work = await finalize.findWork(ctx);
+  assert.equal(work.length, 1, "the second pass reads the current epoch, not the start-up one");
+  assert.equal(work[0]?.id, "r1");
+});
+
 test("finalize: a deadline still in the future is not due", async () => {
   const http = new FakeHttp();
   http.on("/stream/transactions", stream([proposal("r1", nowSeconds() + 600, 0)]));

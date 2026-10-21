@@ -168,7 +168,7 @@ export async function findWork(context: JobContext): Promise<WorkItem[]> {
     return [];
   }
 
-  const status = await context.gateway.status();
+  const status = await context.gateway.ledgerStatus();
   const now = nowSeconds();
   const cursorKey = `burn_seat:${registry}`;
   const from = context.state.cursor(cursorKey) ?? 0;

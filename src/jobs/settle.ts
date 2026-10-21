@@ -559,7 +559,7 @@ export async function findWork(context: JobContext): Promise<WorkItem[]> {
     scan.treasuries.add(context.components.spaceTreasury);
   }
 
-  const status = await context.gateway.status();
+  const status = await context.gateway.ledgerStatus();
   const now = nowSeconds();
   const epoch = status.ledger_state.epoch;
 

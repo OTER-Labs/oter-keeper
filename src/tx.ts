@@ -132,7 +132,7 @@ export class Executor {
   async run(manifest: Manifest, label: string): Promise<Outcome> {
     const built = this.buildManifest(manifest);
     const manifestString = await this.manifestString(built);
-    const status = await this.options.gateway.status();
+    const status = await this.options.gateway.ledgerStatus();
     const epoch = status.ledger_state.epoch;
     const nonce = this.randomNonce();
     const header: TransactionHeader = {

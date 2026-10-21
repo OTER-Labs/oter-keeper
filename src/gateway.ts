@@ -101,6 +101,24 @@ export class Gateway {
     return this.startPromise;
   }
 
+  /**
+   * The ledger as the active Gateway sees it now. `status()` answers the start-up network
+   * check and keeps that first answer; a long-running keeper needs the current epoch for
+   * every live-time window and every transaction header, so this asks again each time.
+   */
+  async ledgerStatus(): Promise<GatewayStatus> {
+    await this.status();
+    const answer = await this.post<unknown>("/status/gateway-status", {});
+    const ledger = readLedgerState(answer);
+    if (ledger === null) {
+      throw new GatewayError("the gateway status did not return a ledger state");
+    }
+    if (ledger.network !== this.network) {
+      throw new GatewayError(`the gateway now serves ${ledger.network}, not ${this.network}`);
+    }
+    return { ledger_state: ledger };
+  }
+
   private async start(): Promise<GatewayStatus> {
     const failures: string[] = [];
     let firstMatch: { index: number; status: GatewayStatus } | null = null;
